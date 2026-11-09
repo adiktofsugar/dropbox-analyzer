@@ -2,6 +2,7 @@ import argparse
 
 import dropbox
 from dropbox.exceptions import ApiError, AuthError
+from rich.bar import Bar
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -45,22 +46,11 @@ def percent_of(part: int, whole: int) -> float:
     return 100 * part / whole
 
 
-def size_bar(fraction: float) -> Text:
-    filled_eighths = round(fraction * BAR_WIDTH * 8)
-    full_blocks, remainder = divmod(filled_eighths, 8)
-    partial = " ▏▎▍▌▋▊▉"[remainder].strip()
-    bar = "█" * full_blocks + partial
-    return Text(bar.ljust(BAR_WIDTH), style="cyan")
-
-
 class ClickToOpenTable(DataTable):
-    """DataTable where a single click selects a row, like a file browser.
+    # Stock DataTable only selects on clicking the already-highlighted row,
+    # so move the cursor first and the stock handler sees a repeat click.
 
-    Stock DataTable only selects on a click of the already-highlighted row,
-    so move the cursor first and let the stock handler see a "repeat" click.
-    """
-
-    # Bound here rather than on the app so they beat DataTable's own "left".
+    # Here, not on the app, so they beat DataTable's own "left".
     BINDINGS = [Binding("backspace,left,h", "app.up", "Up")]
 
     async def _on_click(self, event) -> None:
@@ -301,8 +291,6 @@ class DropboxAnalyzer(App):
         table.add_column("Files", key="files")
         self.load(rescan=self.force_rescan)
 
-    # -- loading ----------------------------------------------------------
-
     def set_status(self, message: str) -> None:
         self.query_one("#status", Static).update(message)
 
@@ -386,12 +374,9 @@ class DropboxAnalyzer(App):
                 return None
         return node
 
-    # -- rendering --------------------------------------------------------
-
     def _sorted_children(self, folder: Node) -> list[Node]:
         children = list(folder.children.values())
         if self.sort_by_name:
-            # Folders first, then case-insensitive name.
             return sorted(children, key=lambda n: (not n.is_dir, n.name.lower()))
         return sorted(children, key=lambda n: n.size, reverse=True)
 
@@ -412,13 +397,19 @@ class DropboxAnalyzer(App):
                 name = Text(child.name)
                 files = ""
             share = percent_of(child.size, folder.size)
-            bar_fraction = child.size / largest if largest else 0
+            bar = Bar(
+                size=largest,
+                begin=0,
+                end=child.size,
+                width=BAR_WIDTH,
+                color="cyan",
+            )
             table.add_row(
                 name,
                 self._sharing_marker(child),
                 Text(human_size(child.size), justify="right"),
                 Text(f"{share:.1f}%", justify="right"),
-                size_bar(bar_fraction),
+                bar,
                 Text(files, justify="right"),
                 key=child.path_lower,
             )
@@ -479,8 +470,6 @@ class DropboxAnalyzer(App):
             return None
         child_key = row_key.value.rpartition("/")[2]
         return self.current.children.get(child_key)
-
-    # -- actions ----------------------------------------------------------
 
     @on(DataTable.RowSelected)
     def _row_selected(self, event: DataTable.RowSelected) -> None:
@@ -545,12 +534,6 @@ class DropboxAnalyzer(App):
         self.delete_node(node.path_lower)
 
     def _delete_warnings(self, node: Node) -> list[Text]:
-        """Explain who else a delete affects, per Dropbox's sharing rules.
-
-        Deleting a shared folder itself only removes it from your Dropbox
-        (other members keep it), even for the owner. Deleting anything inside
-        a shared folder deletes it for every member.
-        """
         warnings = []
         shared_root = node.shared_root()
         if shared_root is node:
@@ -593,10 +576,8 @@ class DropboxAnalyzer(App):
             )
         return warnings
 
-    # The view can be out of date (edits on another device, or by people in a
-    # shared folder), so a delete stops if the item changed since our scan and
-    # asks before deleting anyway. Dropbox enforces that for files via
-    # parent_rev; folders have no revision, so for those we fetch changes first.
+    # The view may be stale. Dropbox guards files via parent_rev, but folders
+    # have no revision, so fetch changes before deleting one.
 
     @work(thread=True)
     def delete_node(self, path_lower: str, force: bool = False) -> None:

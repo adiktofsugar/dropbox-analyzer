@@ -1,5 +1,3 @@
-"""OAuth2 (PKCE, no client secret) login with a stored refresh token."""
-
 import json
 import os
 
@@ -54,7 +52,7 @@ def get_app_key() -> str:
 def _run_oauth_flow(app_key: str) -> str:
     flow = dropbox.DropboxOAuth2FlowNoRedirect(
         app_key,
-        use_pkce=True,
+        use_pkce=True,  # so users don't need an app secret
         token_access_type="offline",
         scope=SCOPES,
     )
@@ -88,7 +86,6 @@ def _client_from(app_key: str, refresh_token: str) -> dropbox.Dropbox:
 
 
 def get_client() -> dropbox.Dropbox:
-    """Return an authenticated client, running the browser login if needed."""
     token_path = _token_file()
     if token_path.exists():
         saved = json.loads(token_path.read_text())

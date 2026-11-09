@@ -1,9 +1,3 @@
-"""Listing the whole Dropbox, caching it, and building a size tree.
-
-The full listing is cached along with Dropbox's list_folder cursor, so later
-runs only fetch what changed since the last scan.
-"""
-
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,8 +24,8 @@ class Entry:
     modified: str | None = None
     id: str | None = None
     content_hash: str | None = None
-    shared_folder_id: str | None = None  # set only on a shared folder's root
-    rev: str | None = None  # files only; lets a delete fail if the file changed
+    shared_folder_id: str | None = None
+    rev: str | None = None  # lets a delete fail if the file changed
 
     def to_list(self) -> list:
         return [
@@ -55,7 +49,7 @@ class Entry:
 class Snapshot:
     account_id: str
     cursor: str | None = None
-    entries: dict[str, Entry] = field(default_factory=dict)  # keyed by path_lower
+    entries: dict[str, Entry] = field(default_factory=dict)
     synced_at: datetime | None = None
 
 
@@ -177,7 +171,6 @@ class RefreshResult:
         return self.rescanned or bool(self.changed_paths)
 
     def touches(self, path_lower: str) -> bool:
-        """Whether anything at, inside, or above this path changed."""
         if self.rescanned:
             return True
         for changed in self.changed_paths:
@@ -192,7 +185,6 @@ class RefreshResult:
 def refresh(
     client: dropbox.Dropbox, snapshot: Snapshot, on_progress: ProgressCallback
 ) -> RefreshResult:
-    """Bring a cached snapshot up to date, falling back to a full scan."""
     if snapshot.cursor is None:
         rescanned = full_scan(client, snapshot.account_id, on_progress)
         return RefreshResult(rescanned, changed_paths=set(), rescanned=True)
@@ -209,10 +201,6 @@ def refresh(
     return RefreshResult(snapshot, changed_paths=changed_paths, rescanned=False)
 
 
-# ---------------------------------------------------------------------------
-# Tree
-
-
 @dataclass(eq=False)
 class Node:
     name: str
@@ -221,13 +209,12 @@ class Node:
     entry: Entry | None = None
     parent: "Node | None" = None
     children: dict[str, "Node"] = field(default_factory=dict)
-    size: int = 0  # file size, or total of everything beneath a folder
+    size: int = 0
     file_count: int = 0
     folder_count: int = 0
 
     @property
     def key(self) -> str:
-        """This node's key in its parent's children (last path_lower part)."""
         return self.path_lower.rpartition("/")[2]
 
     @property
@@ -251,7 +238,6 @@ class Node:
         return self.entry.shared_folder_id
 
     def shared_root(self) -> "Node | None":
-        """The shared folder this node is, or is inside, if any."""
         node = self
         while node is not None:
             if node.shared_folder_id:
@@ -286,7 +272,6 @@ class Node:
             stack.extend(node.children.values())
 
     def detach(self) -> None:
-        """Remove this node from the tree, updating ancestor totals."""
         if self.parent is None:
             return
         removed_files = self.file_count if self.is_dir else 1
@@ -307,7 +292,6 @@ def build_tree(entries: dict[str, Entry]) -> Node:
         existing = nodes.get(path_lower)
         if existing is not None:
             return existing
-        # parent_path, _, name = path_lower.rpartition("/")
         parent_path, _, name = path_lower.rpartition("/")
         parent = get_folder(parent_path)
         folder = Node(name=name, path_lower=path_lower, is_dir=True, parent=parent)
@@ -315,7 +299,7 @@ def build_tree(entries: dict[str, Entry]) -> Node:
         nodes[path_lower] = folder
         return folder
 
-    # Shortest paths first so folders exist (with real names) before children.
+    # Parents first, so placeholder folders get their real names.
     for path_lower in sorted(entries, key=len):
         entry = entries[path_lower]
         if entry.is_dir:
@@ -340,7 +324,7 @@ def build_tree(entries: dict[str, Entry]) -> Node:
 
 
 def _total(root: Node) -> None:
-    # Post-order without recursion; Dropbox trees can be very deep.
+    # Iterative: deep trees would hit the recursion limit.
     order = []
     stack = [root]
     while stack:

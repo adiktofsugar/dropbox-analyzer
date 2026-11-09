@@ -1,5 +1,3 @@
-"""Drive the TUI against a fake Dropbox client."""
-
 import asyncio
 from datetime import datetime
 from types import SimpleNamespace
@@ -102,8 +100,8 @@ class FakeDropbox:
     def __init__(self):
         self.deleted = []
         self.delete_revs = []
-        self.delta = []  # changes the next refresh will see, handed out once
-        self.server_revs = {}  # path_lower -> rev, for files changed remotely
+        self.delta = []
+        self.server_revs = {}
 
     def users_get_current_account(self):
         return SimpleNamespace(account_id=MY_ACCOUNT)
@@ -207,7 +205,7 @@ def test_browse_click_and_up():
         assert app.current.path_display == "/Photos"
         await pilot.press("h")
         assert app.current.path_display == "/"
-        # A single click opens a folder (row 0 is the header).
+        # y=1 because row 0 is the header.
         await pilot.click("DataTable", offset=(3, 1))
         await pilot.pause()
         assert app.current.path_display == "/Work"
@@ -337,7 +335,6 @@ def test_folder_changed_asks_delete_anyway():
         await pilot.pause()
         assert fake.deleted == []
         assert is_delete_anyway_prompt(app)
-        # The prompt shows the folder as it is now.
         assert app.screen.node.file_count == 2
         await pilot.press("y")
         await app.workers.wait_for_complete()

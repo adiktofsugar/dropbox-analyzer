@@ -1,5 +1,3 @@
-"""Who owns each shared folder, and who it's shared with."""
-
 from dataclasses import dataclass
 
 import dropbox
@@ -9,7 +7,7 @@ import dropbox
 class SharedFolder:
     shared_folder_id: str
     name: str
-    access_type: str  # "owner", "editor", "viewer", ...
+    access_type: str
     owner_names: list[str]
     team_folder: bool
 
@@ -34,11 +32,10 @@ class Member:
     email: str | None
     access_type: str
     is_you: bool = False
-    kind: str = "user"  # "user", "group", or "invitee"
+    kind: str = "user"
 
 
 def access_name(access_level) -> str:
-    """'owner', 'editor', etc. from a sharing.AccessLevel union."""
     return access_level._tag
 
 
@@ -53,7 +50,6 @@ def _from_metadata(metadata) -> SharedFolder:
 
 
 def list_shared_folders(client: dropbox.Dropbox) -> dict[str, SharedFolder]:
-    """Every shared folder the account is a member of, by shared_folder_id."""
     folders = {}
     result = client.sharing_list_folders()
     while True:
@@ -111,6 +107,5 @@ def list_members(
             break
         result = client.sharing_list_folder_members_continue(result.cursor)
 
-    # Owner first, then you, then everyone else by name.
     members.sort(key=lambda m: (m.access_type != "owner", not m.is_you, m.name.lower()))
     return members
