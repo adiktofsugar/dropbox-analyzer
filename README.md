@@ -10,11 +10,9 @@ where every folder shows its total size, largest first.
 
 ## Setup
 
-- clone the repo
-- `uv run dropbox-analyzer`
-- follow the instructions
-
-> Coming soon - a released version so cloning isn't necessary!
+Pick a release from the Releases tab; each one has instructions for running
+it with [uv](https://docs.astral.sh/uv/). Then follow the instructions it
+prints.
 
 The first scan can take a while for big accounts. Later runs only fetch
 changes.

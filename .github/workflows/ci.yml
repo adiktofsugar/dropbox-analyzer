@@ -66,7 +66,29 @@ jobs:
             exit 0
           fi
 
+          wheel_path="$(ls dist/*.whl)"
+          # os.path.basename(wheel_path)
+          wheel_name="${wheel_path##*/}"
+          wheel_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}/${wheel_name}"
+
+          # gh puts --notes above the --generate-notes changelog.
+          notes="$(cat <<EOF
+          Run with [uv](https://docs.astral.sh/uv/):
+
+          \`\`\`sh
+          uvx --from ${wheel_url} dropbox-analyzer
+          \`\`\`
+
+          Or install it so \`dropbox-analyzer\` is on your \`PATH\`:
+
+          \`\`\`sh
+          uv tool install ${wheel_url}
+          \`\`\`
+          EOF
+          )"
+
           gh release create "$tag" dist/* \
             --target "$GITHUB_SHA" \
             --title "$tag" \
+            --notes "$notes" \
             --generate-notes
