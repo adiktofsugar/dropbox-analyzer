@@ -79,10 +79,13 @@ class ConfirmDelete(ModalScreen[bool]):
         Binding("n,escape", "cancel", "Cancel"),
     ]
 
-    def __init__(self, node: Node, warnings: list[Text]) -> None:
+    def __init__(
+        self, node: Node, warnings: list[Text], title: str | None = None
+    ) -> None:
         super().__init__()
         self.node = node
         self.warnings = warnings
+        self.title = title
 
     def compose(self) -> ComposeResult:
         node = self.node
@@ -91,7 +94,7 @@ class ConfirmDelete(ModalScreen[bool]):
         if node.is_dir:
             details += f", {node.file_count:,} files"
         with Vertical(id="dialog"):
-            yield Label(f"Delete this {kind}?", id="title")
+            yield Label(self.title or f"Delete this {kind}?", id="title")
             yield Label(Text(node.path_display, style="bold"))
             yield Label(details)
             for warning in self.warnings:
@@ -327,7 +330,7 @@ class DropboxAnalyzer(App):
         cached = None if rescan else load_snapshot(self.account_id)
         if cached is not None:
             self.call_from_thread(self.set_status, "Checking for changes…")
-            snapshot = refresh(self.client, cached, self._report_progress)
+            snapshot = refresh(self.client, cached, self._report_progress).snapshot
         else:
             snapshot = full_scan(self.client, self.account_id, self._report_progress)
         save_snapshot(snapshot)
@@ -365,9 +368,11 @@ class DropboxAnalyzer(App):
 
     def _show_new_tree(self, root: Node) -> None:
         previous_path = self.current.path_lower if self.current else ""
+        highlighted = self._highlighted() if self.root else None
+        highlight_key = highlighted.path_lower if highlighted else None
         self.root = root
         self.current = self._find(previous_path) or root
-        self.render_folder()
+        self.render_folder(highlight_key=highlight_key)
         file_count = root.file_count
         self.set_status(f"Scanned {file_count:,} files, {root.folder_count:,} folders")
 
@@ -528,7 +533,7 @@ class DropboxAnalyzer(App):
 
         def confirmed(should_delete: bool | None) -> None:
             if should_delete:
-                self.delete_node(node)
+                self.delete_node(node.path_lower)
 
         warnings = self._delete_warnings(node)
         self.push_screen(ConfirmDelete(node, warnings), confirmed)
@@ -537,7 +542,7 @@ class DropboxAnalyzer(App):
         node = self._highlighted()
         if node is None or self.busy:
             return
-        self.delete_node(node)
+        self.delete_node(node.path_lower)
 
     def _delete_warnings(self, node: Node) -> list[Text]:
         """Explain who else a delete affects, per Dropbox's sharing rules.
@@ -588,19 +593,76 @@ class DropboxAnalyzer(App):
             )
         return warnings
 
+    # The view can be out of date (edits on another device, or by people in a
+    # shared folder), so a delete stops if the item changed since our scan and
+    # asks before deleting anyway. Dropbox enforces that for files via
+    # parent_rev; folders have no revision, so for those we fetch changes first.
+
     @work(thread=True)
-    def delete_node(self, node: Node) -> None:
+    def delete_node(self, path_lower: str, force: bool = False) -> None:
+        self.busy = True
+        try:
+            self._delete(path_lower, force)
+        except Exception as error:
+            self._report_error(f"Couldn't delete {path_lower}: {error}")
+        finally:
+            self.busy = False
+
+    def _delete(self, path_lower: str, force: bool) -> None:
+        node = self._find(path_lower)
+        if node.is_dir and not force:
+            self.call_from_thread(self.set_status, "Checking for changes…")
+            changes = refresh(self.client, self.snapshot, self._report_progress)
+            if changes.anything_changed:
+                save_snapshot(self.snapshot)
+                root = build_tree(self.snapshot.entries)
+                self.call_from_thread(self._show_new_tree, root)
+            if changes.touches(path_lower):
+                current_node = self._find(path_lower) or node
+                self.call_from_thread(self._ask_delete_anyway, current_node)
+                return
+
+        check_rev = not node.is_dir and not force
+        parent_rev = node.entry.rev if check_rev else None
         self.call_from_thread(self.set_status, f"Deleting {node.path_display}…")
         try:
-            self.client.files_delete_v2(node.path_lower)
+            self.client.files_delete_v2(path_lower, parent_rev=parent_rev)
         except ApiError as error:
-            message = f"Couldn't delete {node.path_display}: {error.error}"
-            self.call_from_thread(self.set_status, message)
-            self.call_from_thread(self.notify, message, severity="error")
+            if check_rev and self._file_changed(node):
+                self.call_from_thread(self._ask_delete_anyway, node)
+                return
+            self._report_error(f"Couldn't delete {node.path_display}: {error.error}")
             return
-        remove_subtree(self.snapshot.entries, node.path_lower)
+        remove_subtree(self.snapshot.entries, path_lower)
         save_snapshot(self.snapshot)
-        self.call_from_thread(self._after_delete, node)
+        self.call_from_thread(self._after_delete, self._find(path_lower) or node)
+
+    def _file_changed(self, node: Node) -> bool:
+        try:
+            current = self.client.files_get_metadata(node.path_lower)
+        except ApiError:
+            return False  # gone; the delete error already says so
+        return getattr(current, "rev", None) != node.entry.rev
+
+    def _ask_delete_anyway(self, node: Node) -> None:
+        synced_at = self.snapshot.synced_at
+        if synced_at is None:
+            since = "your last scan"
+        else:
+            since = synced_at.astimezone().strftime("%b %-d, %H:%M")
+        title = f"This changed since {since}. Delete anyway?"
+
+        def answered(delete_anyway: bool | None) -> None:
+            if delete_anyway:
+                self.delete_node(node.path_lower, force=True)
+            else:
+                self.action_refresh()
+
+        self.push_screen(ConfirmDelete(node, [], title=title), answered)
+
+    def _report_error(self, message: str) -> None:
+        self.call_from_thread(self.set_status, message)
+        self.call_from_thread(self.notify, message, severity="error")
 
     def _after_delete(self, node: Node) -> None:
         table = self.query_one(DataTable)

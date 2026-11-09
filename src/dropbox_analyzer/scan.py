@@ -7,7 +7,7 @@ runs only fetch what changed since the last scan.
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 import dropbox
 from dropbox.exceptions import ApiError
@@ -15,7 +15,7 @@ from dropbox.files import DeletedMetadata, FileMetadata, FolderMetadata
 
 from .paths import cache_dir
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 PAGE_LIMIT = 2000
 
 ProgressCallback = Callable[[int], None]
@@ -31,6 +31,7 @@ class Entry:
     id: str | None = None
     content_hash: str | None = None
     shared_folder_id: str | None = None  # set only on a shared folder's root
+    rev: str | None = None  # files only; lets a delete fail if the file changed
 
     def to_list(self) -> list:
         return [
@@ -42,6 +43,7 @@ class Entry:
             self.id,
             self.content_hash,
             self.shared_folder_id,
+            self.rev,
         ]
 
     @classmethod
@@ -54,6 +56,7 @@ class Snapshot:
     account_id: str
     cursor: str | None = None
     entries: dict[str, Entry] = field(default_factory=dict)  # keyed by path_lower
+    synced_at: datetime | None = None
 
 
 def _cache_file(account_id: str):
@@ -72,13 +75,20 @@ def load_snapshot(account_id: str) -> Snapshot | None:
     if raw.get("version") != CACHE_VERSION:
         return None
     entries = {key: Entry.from_list(value) for key, value in raw["entries"].items()}
-    return Snapshot(account_id=account_id, cursor=raw["cursor"], entries=entries)
+    synced_at = raw.get("synced_at")
+    return Snapshot(
+        account_id=account_id,
+        cursor=raw["cursor"],
+        entries=entries,
+        synced_at=datetime.fromisoformat(synced_at) if synced_at else None,
+    )
 
 
 def save_snapshot(snapshot: Snapshot) -> None:
     raw = {
         "version": CACHE_VERSION,
         "cursor": snapshot.cursor,
+        "synced_at": snapshot.synced_at.isoformat() if snapshot.synced_at else None,
         "entries": {key: entry.to_list() for key, entry in snapshot.entries.items()},
     }
     path = _cache_file(snapshot.account_id)
@@ -121,18 +131,28 @@ def _apply(entries: dict[str, Entry], metadata) -> None:
             modified=metadata.server_modified.isoformat(),
             id=metadata.id,
             content_hash=metadata.content_hash,
+            rev=metadata.rev,
         )
 
 
-def _drain(client: dropbox.Dropbox, result, snapshot: Snapshot, on_progress) -> None:
+def _drain(
+    client: dropbox.Dropbox,
+    result,
+    snapshot: Snapshot,
+    on_progress: ProgressCallback,
+    changed_paths: set[str] | None = None,
+) -> None:
     while True:
         for metadata in result.entries:
             _apply(snapshot.entries, metadata)
+            if changed_paths is not None:
+                changed_paths.add(metadata.path_lower)
         on_progress(len(snapshot.entries))
         if not result.has_more:
             break
         result = client.files_list_folder_continue(result.cursor)
     snapshot.cursor = result.cursor
+    snapshot.synced_at = datetime.now(UTC)
 
 
 def full_scan(
@@ -146,21 +166,47 @@ def full_scan(
     return snapshot
 
 
+@dataclass
+class RefreshResult:
+    snapshot: Snapshot
+    changed_paths: set[str]
+    rescanned: bool  # cursor expired, so we can't say what changed
+
+    @property
+    def anything_changed(self) -> bool:
+        return self.rescanned or bool(self.changed_paths)
+
+    def touches(self, path_lower: str) -> bool:
+        """Whether anything at, inside, or above this path changed."""
+        if self.rescanned:
+            return True
+        for changed in self.changed_paths:
+            is_same = changed == path_lower
+            is_inside = changed.startswith(path_lower + "/")
+            is_above = path_lower.startswith(changed + "/")
+            if is_same or is_inside or is_above:
+                return True
+        return False
+
+
 def refresh(
     client: dropbox.Dropbox, snapshot: Snapshot, on_progress: ProgressCallback
-) -> Snapshot:
+) -> RefreshResult:
     """Bring a cached snapshot up to date, falling back to a full scan."""
     if snapshot.cursor is None:
-        return full_scan(client, snapshot.account_id, on_progress)
+        rescanned = full_scan(client, snapshot.account_id, on_progress)
+        return RefreshResult(rescanned, changed_paths=set(), rescanned=True)
     try:
         first_page = client.files_list_folder_continue(snapshot.cursor)
     except ApiError as error:
         cursor_expired = error.error.is_reset()
         if not cursor_expired:
             raise
-        return full_scan(client, snapshot.account_id, on_progress)
-    _drain(client, first_page, snapshot, on_progress)
-    return snapshot
+        rescanned = full_scan(client, snapshot.account_id, on_progress)
+        return RefreshResult(rescanned, changed_paths=set(), rescanned=True)
+    changed_paths: set[str] = set()
+    _drain(client, first_page, snapshot, on_progress, changed_paths)
+    return RefreshResult(snapshot, changed_paths=changed_paths, rescanned=False)
 
 
 # ---------------------------------------------------------------------------

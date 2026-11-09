@@ -3,6 +3,8 @@ name = "dropbox-analyzer"
 version = "0.1.0"
 description = "Browse what is using space in your Dropbox"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "dropbox>=12.2.4",

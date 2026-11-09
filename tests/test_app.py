@@ -5,7 +5,8 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
-from dropbox import sharing
+from dropbox import files, sharing
+from dropbox.exceptions import ApiError
 from dropbox.files import (
     DeletedMetadata,
     FileMetadata,
@@ -36,7 +37,7 @@ def folder(path, shared_folder_id=None):
     )
 
 
-def file(path, size):
+def file(path, size, rev="0123456789abc"):
     return FileMetadata(
         name=path.rsplit("/", 1)[1],
         path_lower=path.lower(),
@@ -44,7 +45,7 @@ def file(path, size):
         id="id:" + path,
         client_modified=datetime(2024, 1, 1),
         server_modified=datetime(2024, 1, 2),
-        rev="0123456789abc",
+        rev=rev,
         size=size,
         content_hash="h" * 64,
     )
@@ -100,7 +101,9 @@ def user_member(account_id, name, email, access):
 class FakeDropbox:
     def __init__(self):
         self.deleted = []
-        self.delta = []
+        self.delete_revs = []
+        self.delta = []  # changes the next refresh will see, handed out once
+        self.server_revs = {}  # path_lower -> rev, for files changed remotely
 
     def users_get_current_account(self):
         return SimpleNamespace(account_id=MY_ACCOUNT)
@@ -117,10 +120,20 @@ class FakeDropbox:
     def files_list_folder_continue(self, cursor):
         if cursor == "c1":
             return ListFolderResult(entries=ENTRIES[4:], cursor="c2", has_more=False)
-        return ListFolderResult(entries=self.delta, cursor="c3", has_more=False)
+        changes = self.delta
+        self.delta = []
+        return ListFolderResult(entries=changes, cursor="c3", has_more=False)
 
-    def files_delete_v2(self, path):
+    def files_delete_v2(self, path, parent_rev=None):
+        server_rev = self.server_revs.get(path)
+        if parent_rev is not None and server_rev not in (None, parent_rev):
+            lookup_error = files.LookupError.not_found
+            raise ApiError("req", files.DeleteError.path_lookup(lookup_error), None, None)
         self.deleted.append(path)
+        self.delete_revs.append(parent_rev)
+
+    def files_get_metadata(self, path):
+        return file(path, 1, rev=self.server_revs.get(path, "0123456789abc"))
 
     def sharing_list_folders(self):
         entries = [
@@ -304,5 +317,92 @@ def test_incremental_refresh():
         await pilot.pause()
         assert "new.bin" in row_names(app)
         assert app._find("/photos").size == 7_001_000
+
+    run(scenario)
+
+
+def is_delete_anyway_prompt(app):
+    if not isinstance(app.screen, ConfirmDelete):
+        return False
+    title = str(app.screen.query_one("#title").render())
+    return "Delete anyway?" in title
+
+
+def test_folder_changed_asks_delete_anyway():
+    async def scenario(app, pilot, fake):
+        fake.delta = [file("/Work/added-elsewhere.bin", 1_000)]
+        move_to(app, "Work/")
+        await pilot.press("D")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == []
+        assert is_delete_anyway_prompt(app)
+        # The prompt shows the folder as it is now.
+        assert app.screen.node.file_count == 2
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == ["/work"]
+
+    run(scenario)
+
+
+def test_folder_unrelated_changes_dont_ask():
+    async def scenario(app, pilot, fake):
+        fake.delta = [file("/Photos/elsewhere.jpg", 1_000)]
+        move_to(app, "Work/")
+        await pilot.press("D")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == ["/work"]
+
+    run(scenario)
+
+
+def test_folder_changed_while_confirming_can_be_declined():
+    async def scenario(app, pilot, fake):
+        move_to(app, "Work/")
+        await pilot.press("d")
+        await pilot.pause()
+        fake.delta = [file("/Work/added-elsewhere.bin", 1_000)]
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert is_delete_anyway_prompt(app)
+        await pilot.press("n")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == []
+        assert "Work/" in row_names(app)
+
+    run(scenario)
+
+
+def test_file_changed_asks_delete_anyway():
+    async def scenario(app, pilot, fake):
+        fake.server_revs["/notes.txt"] = "fedcba987654321"
+        move_to(app, "notes.txt")
+        await pilot.press("D")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == []
+        assert is_delete_anyway_prompt(app)
+        await pilot.press("y")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == ["/notes.txt"]
+        assert fake.delete_revs == [None]
+
+    run(scenario)
+
+
+def test_file_delete_sends_revision():
+    async def scenario(app, pilot, fake):
+        move_to(app, "notes.txt")
+        await pilot.press("D")
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert fake.deleted == ["/notes.txt"]
+        assert fake.delete_revs == ["0123456789abc"]
 
     run(scenario)
