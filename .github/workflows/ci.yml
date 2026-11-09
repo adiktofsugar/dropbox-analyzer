@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Pinned: the wheel's WHEEL file records "Generator: uv <version>", so a
+  # different uv would produce a different artifact for the same source and
+  # trip the "already released" check below.
+  UV_VERSION: "0.9.18"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --locked
+      - run: uv run pytest
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Build
+        run: uv build --out-dir dist
+
+      - name: Compare with existing release, or create it
+        run: |
+          version="$(uv version --short)"
+          tag="v${version}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists; checking artifacts are unchanged"
+            released_dir="$(mktemp -d)"
+            gh release download "$tag" --dir "$released_dir"
+
+            # Compare sha256 of each file by name; any difference means the
+            # code changed without a version bump.
+            built_sums="$(cd dist && sha256sum -- * | sort -k2)"
+            released_sums="$(cd "$released_dir" && sha256sum -- * | sort -k2)"
+            if [ "$built_sums" != "$released_sums" ]; then
+              echo "::error::Artifacts differ from release $tag. Bump the version in pyproject.toml."
+              diff <(echo "$released_sums") <(echo "$built_sums") || true
+              exit 1
+            fi
+            echo "Artifacts match release $tag"
+            exit 0
+          fi
+
+          if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+            echo "Release $tag does not exist yet; it will be created on merge to main"
+            exit 0
+          fi
+
+          gh release create "$tag" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$tag" \
+            --generate-notes
