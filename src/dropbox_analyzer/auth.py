@@ -3,8 +3,7 @@ import os
 
 import dropbox
 from dropbox.exceptions import AuthError
-
-from .paths import config_dir
+from platformdirs import user_config_path
 
 SCOPES = [
     "account_info.read",
@@ -14,12 +13,16 @@ SCOPES = [
 ]
 
 
+def _config_dir():
+    return user_config_path("dropbox-analyzer", ensure_exists=True)
+
+
 def _token_file():
-    return config_dir() / "token.json"
+    return _config_dir() / "token.json"
 
 
 def _config_file():
-    return config_dir() / "config.json"
+    return _config_dir() / "config.json"
 
 
 def _write_private(path, data: dict) -> None:

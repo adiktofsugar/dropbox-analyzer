@@ -6,8 +6,7 @@ from datetime import UTC, datetime
 import dropbox
 from dropbox.exceptions import ApiError
 from dropbox.files import DeletedMetadata, FileMetadata, FolderMetadata
-
-from .paths import cache_dir
+from platformdirs import user_cache_path
 
 CACHE_VERSION = 3
 PAGE_LIMIT = 2000
@@ -55,7 +54,8 @@ class Snapshot:
 
 def _cache_file(account_id: str):
     safe_id = account_id.replace(":", "_")
-    return cache_dir() / f"{safe_id}.json"
+    cache_dir = user_cache_path("dropbox-analyzer", ensure_exists=True)
+    return cache_dir / f"{safe_id}.json"
 
 
 def load_snapshot(account_id: str) -> Snapshot | None:

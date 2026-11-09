@@ -3,6 +3,7 @@ import argparse
 import dropbox
 from dropbox.exceptions import ApiError, AuthError
 from rich.bar import Bar
+from rich.filesize import decimal as human_size
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -27,17 +28,6 @@ from .sharing import SharedFolder
 
 BAR_WIDTH = 20
 UP_KEY = "__up__"
-
-
-def human_size(num_bytes: int) -> str:
-    size = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if size < 1024 or unit == "TB":
-            if unit == "B":
-                return f"{int(size)} B"
-            return f"{size:.1f} {unit}"
-        size /= 1024
-    raise AssertionError("unreachable")
 
 
 def percent_of(part: int, whole: int) -> float:
@@ -123,11 +113,15 @@ class InfoScreen(ModalScreen[None]):
 
     def _rows(self) -> list[tuple[str, str]]:
         node = self.node
+        size_text = human_size(node.size)
+        # Under 1 kB, human_size already gives the exact byte count.
+        if node.size >= 1000:
+            size_text += f"  ({node.size:,} bytes)"
         rows = [
             ("Name", node.name),
             ("Path", node.path_display),
             ("Type", "Folder" if node.is_dir else "File"),
-            ("Size", f"{human_size(node.size)}  ({node.size:,} bytes)"),
+            ("Size", size_text),
         ]
         if node.parent is not None:
             parent_share = percent_of(node.size, node.parent.size)
